@@ -26,9 +26,9 @@ const Method = enum {
     }
 };
 
-const Http_version = enum(f16) {
-    first = 1.1,
-    second = 2.0,
+const Http_version = enum {
+    first,
+    second,
 };
 
 const Http_Request = struct {
@@ -68,7 +68,7 @@ const Http_Request = struct {
         if (body != null) {
             const len = body.?.len;
             var buf = try allocator.alloc(u8, 10);
-            try std.fmt.bufPrint(&buf, "{}", .{len});
+            try std.fmt.bufPrint(&buf, "{s}", .{len});
             default_headers.put("Content-Length", buf);
         }
 
@@ -81,18 +81,18 @@ const Http_Request = struct {
         };
     }
 
-    pub fn send(self: Http_Request, connection: std.net.Stream) u8 {
+    pub fn send(self: Http_Request, connection: std.net.Stream) void {
         var writer = connection.writer();
         //write all of the request to the Stream
         const method_string = self.method.toString();
         const path = self.uri.path.raw;
-        try writer.print("{} {} HTTP/1.1\r\n", .{ method_string, path });
+        try writer.print("{s} {s} HTTP/1.1\r\n", .{ method_string, path });
         var header_iterator = self.headers.iterator();
         while (header_iterator.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
-            try writer.print("{}: {}\r\n", .{ key, value });
+            try writer.print("{s}: {s}\r\n", .{ key, value });
         }
         try writer.writeAll("\r\n");
 
@@ -100,7 +100,6 @@ const Http_Request = struct {
             const value = self.body.?;
             try writer.writeAll(value);
         }
-        return 1;
     }
 
     pub fn response(allocator: std.mem.Allocator, connection: std.net.Stream) void {
@@ -112,4 +111,19 @@ const Http_Request = struct {
     }
 };
 
-pub fn main() !void {}
+pub fn main() !void {
+    var gal = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gal.deinit();
+
+    const allocator = gal.allocator();
+
+    var headers = std.StringHashMap([]const u8).init(allocator);
+    try headers.put("Content-Type", "text/html");
+
+    const stream = try std.net.tcpConnectToHost(allocator, "httpforever.com", 80);
+
+    var http_req = Http_Request.request_builder(allocator, "http://httpforever.com", Method.GET, Http_version.first, headers, null);
+    http_req.send(stream);
+    std.time.sleep(1000);
+    http_req.response(allocator, stream);
+}
