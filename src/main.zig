@@ -92,14 +92,23 @@ const Http_Request = struct {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
 
-            try writer.print("{}: {}", .{ key, value });
+            try writer.print("{}: {}\r\n", .{ key, value });
         }
+        try writer.writeAll("\r\n");
 
         if (self.body != null) {
             const value = self.body.?;
             try writer.writeAll(value);
         }
         return 1;
+    }
+
+    pub fn response(allocator: std.mem.Allocator, connection: std.net.Stream) void {
+        var reader = connection.reader();
+        var buffer = try allocator.alloc(u8, 1024);
+        defer allocator.free(buffer);
+        const bytes_read = try reader.read(buffer);
+        std.debug.print("{s}", .{buffer[0..bytes_read]});
     }
 };
 
