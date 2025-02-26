@@ -38,50 +38,40 @@ const Http_Response = struct {
     headers: std.StringHashMap([]const u8),
     body: []const u8,
 
-    const statusData = struct {
-        version: []const u8,
-        status_code: i32,
-        status_message: []const u8,
-    };
-
-    pub fn decode_status_line(string: []const u8) !statusData {
-        var iterator = std.mem.splitSequence(u8, string, " ");
-        const version = iterator.next().?;
-        const status_code = try std.fmt.parseInt(i32, iterator.next().?, 10);
-        const status_message = iterator.next().?;
-
-        return statusData{
-            .version = version,
-            .status_code = status_code,
-            .status_message = status_message,
-        };
-    }
-
-    pub fn decode_http_response(response: std.ArrayList(u8)) !Http_Response {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        const allocator = gpa.allocator();
+    pub fn decode_http_response(allocator: std.mem.Allocator, response: []u8) !Http_Response {
+        var lines = std.mem.split(u8, response, "\r\n");
         var headers = std.StringHashMap([]const u8).init(allocator);
-        const slice = response.items;
-        var iterator = std.mem.splitSequence(u8, slice, "\r\n");
-        const status_line = iterator.next().?;
-        const status_data = try decode_status_line(status_line);
 
-        while (iterator.next()) |line| {
+        const status_line = lines.next() orelse return error.InvalidResponse;
+        var status_parts = std.mem.split(u8, status_line, " ");
+
+        const http_version = try allocator.dupe(u8, status_parts.next() orelse return error.InvalidResponse);
+        const status_code_str = status_parts.next() orelse return error.InvalidResponse;
+        const status_code = try std.fmt.parseInt(i32, status_code_str, 10);
+        const status_message = try allocator.dupe(u8, status_parts.rest());
+
+        while (lines.next()) |line| {
             if (line.len == 0) {
                 break;
             }
-            var header_split = std.mem.splitSequence(u8, line, ":");
-            const key = header_split.next().?;
-            const value = header_split.next().?;
-            try headers.put(key, value);
+
+            var header_parts = std.mem.split(u8, line, ": ");
+            const header_name = try allocator.dupe(u8, header_parts.next() orelse return error.InvalidHeader);
+            const header_value = try allocator.dupe(u8, header_parts.rest());
+
+            try headers.put(header_name, header_value);
         }
 
-        const body = iterator.rest(); // Capture the entire remaining content as the body
+        var body: []const u8 = "";
+
+        if (lines.rest().len != 0) {
+            body = try allocator.dupe(u8, lines.rest());
+        }
 
         return Http_Response{
-            .status = status_data.status_code,
-            .version = status_data.version,
-            .status_message = status_data.status_message,
+            .status_message = status_message,
+            .status = status_code,
+            .version = http_version,
             .headers = headers,
             .body = body,
         };
@@ -166,35 +156,51 @@ const Http_Request = struct {
     }
 
     pub fn response(_: Http_Request, allocator: std.mem.Allocator, connection: std.net.Stream) !Http_Response {
-        var reader = connection.reader();
         var buffer = std.ArrayList(u8).init(allocator);
         defer buffer.deinit();
 
-        try reader.readAllArrayList(&buffer, 8192);
-        const http_response = try Http_Response.decode_http_response(buffer);
+        var reader = connection.reader();
+        var chunk: [1024]u8 = undefined;
 
-        return http_response;
+        while (true) {
+            const bytes_read = try reader.read(chunk[0..]);
+            if (bytes_read == 0) {
+                break;
+            }
+            try buffer.appendSlice(&chunk);
+        }
+
+        const res = try Http_Response.decode_http_response(allocator, buffer.items);
+
+        return res;
     }
 };
+
+const client = struct {};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
     var headers = std.StringHashMap([]const u8).init(allocator);
-    defer headers.deinit();
     try headers.put("Content-Type", "text/html");
 
-    const stream = try std.net.tcpConnectToHost(allocator, "httpforever.com", 80);
+    const stream = try std.net.tcpConnectToHost(allocator, "neal.fun", 80);
     defer stream.close();
 
-    var http_req = try Http_Request.request_builder(allocator, "http://httpforever.com", Method.GET, Http_version.first, headers, null);
+    var http_req = try Http_Request.request_builder(allocator, "https://neal.fun", Method.GET, Http_version.first, headers, null);
     try http_req.send(stream);
-    std.time.sleep(5000);
 
-    var response = try http_req.response(allocator, stream);
-    defer response.headers.deinit();
+    var res = try http_req.response(allocator, stream);
+    std.debug.print("Http Version {s} status code {} status message {s}\n", .{ res.version, res.status, res.status_message });
 
-    const body = response.body;
-    std.debug.print("{s}\n", .{body});
+    var iterator = res.headers.iterator();
+    while (iterator.next()) |entry| {
+        std.debug.print("Header {s} : Value {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+    }
+
+    std.debug.print("{s}\r\n", .{res.body});
+
+    headers.deinit();
+    res.headers.deinit();
 }
